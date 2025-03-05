@@ -39,14 +39,14 @@ interface PlayerState {
 }
 
 export class GameScene extends Phaser.Scene {
-  private players: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private players: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private playerTexts: Map<string, Phaser.GameObjects.Text> = new Map();
   private healthBars: Map<string, Phaser.GameObjects.Rectangle> = new Map();
   private healthBarBgs: Map<string, Phaser.GameObjects.Rectangle> = new Map();
   private bullets: Bullet[] = [];
   private lastShootTime: number = 0;
   private shootDelay: number = 250; // minimum time between shots in ms
-  private currentPlayer?: Phaser.GameObjects.Rectangle;
+  private currentPlayer?: Phaser.GameObjects.Sprite;
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasdKeys?: {
     W: Phaser.Input.Keyboard.Key;
@@ -65,19 +65,42 @@ export class GameScene extends Phaser.Scene {
   private debugText?: Phaser.GameObjects.Text;
   private roomIdText?: Phaser.GameObjects.Text;
   private roomId: string = '';
+  private virtualButtons: {
+    up?: Phaser.GameObjects.Rectangle;
+    down?: Phaser.GameObjects.Rectangle;
+    left?: Phaser.GameObjects.Rectangle;
+    right?: Phaser.GameObjects.Rectangle;
+    shoot?: Phaser.GameObjects.Rectangle;
+  } = {};
+  private buttonStates = {
+    up: false,
+    down: false,
+    left: false,
+    right: false,
+    shoot: false
+  };
+  private isMobile = false;
+  private createButton?: Phaser.GameObjects.Text;
+  private joinButton?: Phaser.GameObjects.Text;
 
   constructor() {
     super({ key: 'GameScene' });
     this.client = new Client(config.BACKEND_WS_URL);
     console.log('Game scene initialized with backend URL:', config.BACKEND_WS_URL);
+    // Check if device is mobile
+    this.isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
   }
 
   preload() {
     console.log('Scene preloading...');
+    this.load.image('enemy', '/assets/enemy.png');
   }
 
   async create() {
     console.log('Creating game scene...');
+    
+    // Handle resize events
+    this.scale.on('resize', this.handleResize, this);
     
     // Initialize keyboard controls
     this.cursors = this.input.keyboard.createCursorKeys();
@@ -87,7 +110,10 @@ export class GameScene extends Phaser.Scene {
       S: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
       D: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D),
     };
-    console.log('Keyboard controls initialized:', this.cursors, this.wasdKeys);
+
+    if (this.isMobile) {
+      this.createVirtualControls();
+    }
     
     // Create debug text
     this.debugText = this.add.text(10, 10, '', {
@@ -96,37 +122,38 @@ export class GameScene extends Phaser.Scene {
       backgroundColor: '#000000'
     });
 
-    // Create room ID text
-    this.roomIdText = this.add.text(400, 50, '', {
+    // Create room ID text at top center
+    this.roomIdText = this.add.text(this.scale.width / 2, 50, '', {
       fontSize: '24px',
       color: '#ffffff',
       backgroundColor: '#000000'
     }).setOrigin(0.5);
     
-    // Create error text but hide it initially
-    this.errorText = this.add.text(400, 300, '', {
+    // Create error text at center
+    this.errorText = this.add.text(this.scale.width / 2, this.scale.height / 2, '', {
       fontSize: '20px',
       color: '#ff0000',
       align: 'center'
     }).setOrigin(0.5).setVisible(false);
 
-    // Create buttons
-    const createButton = this.add.text(300, 550, 'Create Room', {
+    // Create buttons at a higher position for mobile
+    const buttonY = this.isMobile ? this.scale.height - 150 : this.scale.height - 50;
+    this.createButton = this.add.text(this.scale.width / 3, buttonY, 'Create Room', {
       fontSize: '20px',
       color: '#ffffff',
       backgroundColor: '#00aa00',
       padding: { x: 10, y: 5 }
-    }).setInteractive();
+    }).setOrigin(0.5).setInteractive();
 
-    const joinButton = this.add.text(500, 550, 'Join Room', {
+    this.joinButton = this.add.text(2 * this.scale.width / 3, buttonY, 'Join Room', {
       fontSize: '20px',
       color: '#ffffff',
       backgroundColor: '#0000aa',
       padding: { x: 10, y: 5 }
-    }).setInteractive();
+    }).setOrigin(0.5).setInteractive();
 
-    createButton.on('pointerdown', () => this.createAndJoinRoom());
-    joinButton.on('pointerdown', () => {
+    this.createButton.on('pointerdown', () => this.createAndJoinRoom());
+    this.joinButton.on('pointerdown', () => {
       const roomId = prompt('Enter Room ID:');
       if (roomId) {
         this.joinRoom(roomId);
@@ -136,6 +163,45 @@ export class GameScene extends Phaser.Scene {
     // Mark scene as ready
     this.sceneReady = true;
     console.log('Scene is ready');
+  }
+
+  private handleResize(gameSize: Phaser.Structs.Size) {
+    if (this.roomIdText) {
+      this.roomIdText.setPosition(gameSize.width / 2, 50);
+    }
+    
+    if (this.errorText) {
+      this.errorText.setPosition(gameSize.width / 2, gameSize.height / 2);
+    }
+
+    // Update buttons position
+    const buttons = this.children.list.filter(child => 
+      child instanceof Phaser.GameObjects.Text && 
+      (child.text === 'Create Room' || child.text === 'Join Room')
+    ) as Phaser.GameObjects.Text[];
+
+    const buttonY = this.isMobile ? gameSize.height - 150 : gameSize.height - 50;
+    buttons.forEach((button, index) => {
+      button.setPosition(
+        (index + 1) * gameSize.width / 3,
+        buttonY
+      );
+    });
+
+    // Adjust game boundaries
+    this.physics.world.setBounds(0, 0, gameSize.width, gameSize.height);
+
+    // Update virtual controls position if on mobile
+    if (this.isMobile) {
+      const buttonSize = 60;
+      const buttonPadding = 20;
+
+      if (this.virtualButtons.up) this.virtualButtons.up.setPosition(buttonSize * 1.5, gameSize.height - buttonSize * 2.5);
+      if (this.virtualButtons.down) this.virtualButtons.down.setPosition(buttonSize * 1.5, gameSize.height - buttonSize * 0.5);
+      if (this.virtualButtons.left) this.virtualButtons.left.setPosition(buttonSize * 0.5, gameSize.height - buttonSize * 1.5);
+      if (this.virtualButtons.right) this.virtualButtons.right.setPosition(buttonSize * 2.5, gameSize.height - buttonSize * 1.5);
+      if (this.virtualButtons.shoot) this.virtualButtons.shoot.setPosition(gameSize.width - buttonSize - buttonPadding, gameSize.height - buttonSize - buttonPadding);
+    }
   }
 
   private async createAndJoinRoom() {
@@ -165,6 +231,10 @@ export class GameScene extends Phaser.Scene {
       if (this.roomIdText) {
         this.roomIdText.setText(`Room ID: ${this.roomId}`);
       }
+      
+      // Hide room buttons when game starts
+      if (this.createButton) this.createButton.setVisible(false);
+      if (this.joinButton) this.joinButton.setVisible(false);
       
       console.log('Successfully joined room!', this.room.sessionId);
 
@@ -228,7 +298,7 @@ export class GameScene extends Phaser.Scene {
           
           if (player && text) {
             player.setPosition(x, y);
-            text.setPosition(x, y - 20);
+            text.setPosition(x, y - 25);
           } else {
             console.warn(`Player ${sessionId} not found for position update`);
           }
@@ -316,7 +386,7 @@ export class GameScene extends Phaser.Scene {
             alpha: 0.2,
             duration: 500,
             onComplete: () => {
-              player.setFillStyle(0x666666); // Gray out the player
+              player.setTint(0x666666); // Gray out the player
             }
           });
 
@@ -344,15 +414,15 @@ export class GameScene extends Phaser.Scene {
   private updatePlayer(player: PlayerState, sessionId: string) {
     try {
       console.log('Updating player position:', sessionId, player);
-      const rectangle = this.players.get(sessionId);
+      const sprite = this.players.get(sessionId);
       const text = this.playerTexts.get(sessionId);
       const healthBar = this.healthBars.get(sessionId);
       const healthBarBg = this.healthBarBgs.get(sessionId);
       
-      if (rectangle && text && healthBar && healthBarBg) {
+      if (sprite && text && healthBar && healthBarBg) {
         // Lerp the position for smoother movement
-        const currentX = rectangle.x;
-        const currentY = rectangle.y;
+        const currentX = sprite.x;
+        const currentY = sprite.y;
         const targetX = player.x;
         const targetY = player.y;
         
@@ -362,13 +432,20 @@ export class GameScene extends Phaser.Scene {
         const newY = currentY + (targetY - currentY) * lerpFactor;
         
         // Update positions
-        rectangle.setPosition(newX, newY);
-        text.setPosition(newX, newY - 20);
-        healthBar.setPosition(newX, newY + 20);
-        healthBarBg.setPosition(newX, newY + 20);
+        sprite.setPosition(newX, newY);
+        text.setPosition(newX, newY - 25);
+        healthBar.setPosition(newX, newY + 25);
+        healthBarBg.setPosition(newX, newY + 25);
         
         // Update health bar
         this.updateHealthBar(sessionId, player.health);
+        
+        // Update sprite flip based on movement direction
+        if (newX < currentX) {
+          sprite.setFlipX(true);
+        } else if (newX > currentX) {
+          sprite.setFlipX(false);
+        }
         
         console.log(`Player ${sessionId} moved to:`, newX, newY);
       } else {
@@ -383,11 +460,14 @@ export class GameScene extends Phaser.Scene {
     this.gameStarted = false;
     this.sceneReady = false;  // Reset scene ready state on disconnect
     this.clearAllPlayers();
+    // Show room buttons when disconnected
+    if (this.createButton) this.createButton.setVisible(true);
+    if (this.joinButton) this.joinButton.setVisible(true);
     this.showConnectionError('Disconnected from server');
   }
 
   private clearAllPlayers() {
-    this.players.forEach(rectangle => rectangle.destroy());
+    this.players.forEach(sprite => sprite.destroy());
     this.playerTexts.forEach(text => text.destroy());
     this.healthBars.forEach(bar => bar.destroy());
     this.healthBarBgs.forEach(bg => bg.destroy());
@@ -414,8 +494,11 @@ export class GameScene extends Phaser.Scene {
       console.log('Adding new player:', sessionId, player);
       console.log('Player position:', player.x, player.y);
       
-      const rectangle = this.add.rectangle(player.x, player.y, 32, 32, 0x00ff00);
-      const text = this.add.text(player.x, player.y - 20, 
+      // Create sprite instead of rectangle
+      const sprite = this.add.sprite(player.x, player.y, 'enemy');
+      sprite.setScale(0.2); // Reduce scale from 0.5 to 0.2
+      
+      const text = this.add.text(player.x, player.y - 25, 
         `${player.name || `Player ${sessionId}`}(${player.deathCount}/3)`, { 
         fontSize: '16px',
         color: '#ffffff'
@@ -423,11 +506,11 @@ export class GameScene extends Phaser.Scene {
       text.setOrigin(0.5);
 
       // Add health bar background (gray)
-      const healthBarBg = this.add.rectangle(player.x, player.y + 20, 32, 4, 0x666666);
+      const healthBarBg = this.add.rectangle(player.x, player.y + 25, 32, 4, 0x666666);
       // Add health bar (green)
-      const healthBar = this.add.rectangle(player.x, player.y + 20, 32, 4, 0x00ff00);
+      const healthBar = this.add.rectangle(player.x, player.y + 25, 32, 4, 0x00ff00);
       
-      this.players.set(sessionId, rectangle);
+      this.players.set(sessionId, sprite);
       this.playerTexts.set(sessionId, text);
       this.healthBars.set(sessionId, healthBar);
       this.healthBarBgs.set(sessionId, healthBarBg);
@@ -436,18 +519,18 @@ export class GameScene extends Phaser.Scene {
       this.updateHealthBar(sessionId, player.health);
 
       if (sessionId === this.room?.sessionId) {
-        this.currentPlayer = rectangle;
-        rectangle.setFillStyle(0x00ff00); // Green for current player
+        this.currentPlayer = sprite;
+        sprite.setTint(0x00ff00); // Green tint for current player
         console.log('Current player initialized:', sessionId);
       } else {
-        rectangle.setFillStyle(0xff0000); // Red for other players
-        console.log('Other player initialized with red color:', sessionId);
+        sprite.setTint(0xff0000); // Red tint for other players
+        console.log('Other player initialized with red tint:', sessionId);
       }
 
       // If player is not alive, gray them out
       if (!player.isAlive) {
-        rectangle.setFillStyle(0x666666);
-        rectangle.setAlpha(0.2);
+        sprite.setTint(0x666666);
+        sprite.setAlpha(0.2);
         text.setText(`${text.text.split('(')[0]}(GAME OVER)`);
       }
 
@@ -476,13 +559,13 @@ export class GameScene extends Phaser.Scene {
   }
 
   private removePlayer(sessionId: string) {
-    const rectangle = this.players.get(sessionId);
+    const sprite = this.players.get(sessionId);
     const text = this.playerTexts.get(sessionId);
     const healthBar = this.healthBars.get(sessionId);
     const healthBarBg = this.healthBarBgs.get(sessionId);
     
-    if (rectangle) {
-      rectangle.destroy();
+    if (sprite) {
+      sprite.destroy();
       this.players.delete(sessionId);
     }
     
@@ -544,6 +627,66 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  private createVirtualControls() {
+    const buttonSize = 60;
+    const buttonPadding = 20;
+    const buttonColor = 0x666666;
+    const buttonAlpha = 0.5;
+
+    // Create movement buttons
+    this.virtualButtons.up = this.add.rectangle(buttonSize * 1.5, this.scale.height - buttonSize * 2.5, buttonSize, buttonSize, buttonColor)
+      .setAlpha(buttonAlpha)
+      .setInteractive()
+      .setScrollFactor(0);
+
+    this.virtualButtons.down = this.add.rectangle(buttonSize * 1.5, this.scale.height - buttonSize * 0.5, buttonSize, buttonSize, buttonColor)
+      .setAlpha(buttonAlpha)
+      .setInteractive()
+      .setScrollFactor(0);
+
+    this.virtualButtons.left = this.add.rectangle(buttonSize * 0.5, this.scale.height - buttonSize * 1.5, buttonSize, buttonSize, buttonColor)
+      .setAlpha(buttonAlpha)
+      .setInteractive()
+      .setScrollFactor(0);
+
+    this.virtualButtons.right = this.add.rectangle(buttonSize * 2.5, this.scale.height - buttonSize * 1.5, buttonSize, buttonSize, buttonColor)
+      .setAlpha(buttonAlpha)
+      .setInteractive()
+      .setScrollFactor(0);
+
+    // Create shoot button on the right side
+    this.virtualButtons.shoot = this.add.rectangle(this.scale.width - buttonSize - buttonPadding, this.scale.height - buttonSize - buttonPadding, buttonSize * 1.2, buttonSize * 1.2, 0xff0000)
+      .setAlpha(buttonAlpha)
+      .setInteractive()
+      .setScrollFactor(0);
+
+    // Add button icons/text
+    const textConfig = { fontSize: '32px', color: '#ffffff' };
+    this.add.text(this.virtualButtons.up.x, this.virtualButtons.up.y, '↑', textConfig).setOrigin(0.5).setScrollFactor(0);
+    this.add.text(this.virtualButtons.down.x, this.virtualButtons.down.y, '↓', textConfig).setOrigin(0.5).setScrollFactor(0);
+    this.add.text(this.virtualButtons.left.x, this.virtualButtons.left.y, '←', textConfig).setOrigin(0.5).setScrollFactor(0);
+    this.add.text(this.virtualButtons.right.x, this.virtualButtons.right.y, '→', textConfig).setOrigin(0.5).setScrollFactor(0);
+    this.add.text(this.virtualButtons.shoot.x, this.virtualButtons.shoot.y, '🔫', textConfig).setOrigin(0.5).setScrollFactor(0);
+
+    // Add button event listeners
+    Object.entries(this.virtualButtons).forEach(([key, button]) => {
+      if (button) {
+        button.on('pointerdown', () => {
+          this.buttonStates[key as keyof typeof this.buttonStates] = true;
+          button.setAlpha(0.8);
+        });
+        button.on('pointerup', () => {
+          this.buttonStates[key as keyof typeof this.buttonStates] = false;
+          button.setAlpha(0.5);
+        });
+        button.on('pointerout', () => {
+          this.buttonStates[key as keyof typeof this.buttonStates] = false;
+          button.setAlpha(0.5);
+        });
+      }
+    });
+  }
+
   update(time: number, delta: number) {
     if (!this.gameStarted || !this.currentPlayer || !this.cursors || !this.wasdKeys || !this.room) {
       if (this.debugText) {
@@ -554,17 +697,17 @@ export class GameScene extends Phaser.Scene {
 
     const velocity = { x: 0, y: 0 };
 
-    // Arrow key controls
-    if (this.cursors.left.isDown || this.wasdKeys.A.isDown) {
+    // Check both keyboard and virtual button states
+    if ((this.cursors?.left.isDown || this.wasdKeys?.A.isDown || this.buttonStates.left)) {
       velocity.x = -this.playerSpeed;
     }
-    if (this.cursors.right.isDown || this.wasdKeys.D.isDown) {
+    if ((this.cursors?.right.isDown || this.wasdKeys?.D.isDown || this.buttonStates.right)) {
       velocity.x = this.playerSpeed;
     }
-    if (this.cursors.up.isDown || this.wasdKeys.W.isDown) {
+    if ((this.cursors?.up.isDown || this.wasdKeys?.W.isDown || this.buttonStates.up)) {
       velocity.y = -this.playerSpeed;
     }
-    if (this.cursors.down.isDown || this.wasdKeys.S.isDown) {
+    if ((this.cursors?.down.isDown || this.wasdKeys?.S.isDown || this.buttonStates.down)) {
       velocity.y = this.playerSpeed;
     }
 
@@ -578,7 +721,7 @@ export class GameScene extends Phaser.Scene {
       // Update player text position
       const currentPlayerText = this.playerTexts.get(this.room.sessionId);
       if (currentPlayerText) {
-        currentPlayerText.setPosition(newX, newY - 20);
+        currentPlayerText.setPosition(newX, newY - 25);
       }
       
       // Send position to server
@@ -600,8 +743,8 @@ export class GameScene extends Phaser.Scene {
       bullet.update(time, delta);
       
       // Check for collisions with players
-      this.players.forEach((playerRect, sessionId) => {
-        if (sessionId !== bullet.ownerId && this.checkCollision(bullet, playerRect)) {
+      this.players.forEach((playerSprite, sessionId) => {
+        if (sessionId !== bullet.ownerId && this.checkCollision(bullet, playerSprite)) {
           // Handle hit
           bullet.destroy();
           this.handlePlayerHit(sessionId);
@@ -609,13 +752,13 @@ export class GameScene extends Phaser.Scene {
       });
     });
 
-    // Handle shooting
-    if (this.input.activePointer.isDown) {
+    // Handle shooting for both mouse and virtual button
+    if (this.input.activePointer.isDown || this.buttonStates.shoot) {
       this.shoot();
     }
   }
 
-  private checkCollision(bullet: Bullet, player: Phaser.GameObjects.Rectangle): boolean {
+  private checkCollision(bullet: Bullet, player: Phaser.GameObjects.Sprite): boolean {
     return Phaser.Geom.Intersects.RectangleToRectangle(
       bullet.getBounds(),
       player.getBounds()
@@ -642,14 +785,18 @@ export class GameScene extends Phaser.Scene {
   }
 
   private showGameOver() {
-    const gameOverText = this.add.text(400, 300, 'GAME OVER\nYou died 3 times!', {
+    const gameOverText = this.add.text(this.scale.width / 2, this.scale.height / 2, 'GAME OVER\nYou died 3 times!', {
       fontSize: '48px',
       color: '#ff0000',
       align: 'center'
     }).setOrigin(0.5);
 
+    // Show room buttons when game is over
+    if (this.createButton) this.createButton.setVisible(true);
+    if (this.joinButton) this.joinButton.setVisible(true);
+
     // Add restart button
-    const restartButton = this.add.text(400, 400, 'Restart', {
+    const restartButton = this.add.text(this.scale.width / 2, this.scale.height / 2 + 100, 'Restart', {
       fontSize: '32px',
       color: '#ffffff',
       backgroundColor: '#00aa00',
