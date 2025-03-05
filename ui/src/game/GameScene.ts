@@ -1,17 +1,58 @@
 import * as Phaser from 'phaser';
 import { Client, Room } from 'colyseus.js';
 
+class Bullet extends Phaser.GameObjects.Rectangle {
+  velocity: Phaser.Math.Vector2;
+  lifespan: number = 1000; // bullet lives for 1 second
+  ownerId: string;
+
+  constructor(scene: Phaser.Scene, x: number, y: number, ownerId: string) {
+    super(scene, x, y, 8, 8, 0xffff00);
+    scene.add.existing(this);
+    this.ownerId = ownerId;
+    this.velocity = new Phaser.Math.Vector2();
+  }
+
+  fire(direction: Phaser.Math.Vector2) {
+    this.velocity = direction.normalize().scale(400); // bullet speed
+  }
+
+  update(time: number, delta: number) {
+    this.x += this.velocity.x * (delta / 1000);
+    this.y += this.velocity.y * (delta / 1000);
+    
+    this.lifespan -= delta;
+    if (this.lifespan <= 0) {
+      this.destroy();
+    }
+  }
+}
+
 interface PlayerState {
   x: number;
   y: number;
   name: string;
+  health: number;
+  deathCount: number;
+  isAlive: boolean;
 }
 
 export class GameScene extends Phaser.Scene {
   private players: Map<string, Phaser.GameObjects.Rectangle> = new Map();
   private playerTexts: Map<string, Phaser.GameObjects.Text> = new Map();
+  private healthBars: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private healthBarBgs: Map<string, Phaser.GameObjects.Rectangle> = new Map();
+  private bullets: Bullet[] = [];
+  private lastShootTime: number = 0;
+  private shootDelay: number = 250; // minimum time between shots in ms
   private currentPlayer?: Phaser.GameObjects.Rectangle;
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
+  private wasdKeys?: {
+    W: Phaser.Input.Keyboard.Key;
+    A: Phaser.Input.Keyboard.Key;
+    S: Phaser.Input.Keyboard.Key;
+    D: Phaser.Input.Keyboard.Key;
+  };
   private room?: Room;
   private client: Client;
   private playerSpeed = 200;
@@ -39,7 +80,13 @@ export class GameScene extends Phaser.Scene {
     
     // Initialize keyboard controls
     this.cursors = this.input.keyboard.createCursorKeys();
-    console.log('Keyboard controls initialized:', this.cursors);
+    this.wasdKeys = {
+      W: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.W),
+      A: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A),
+      S: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
+      D: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D),
+    };
+    console.log('Keyboard controls initialized:', this.cursors, this.wasdKeys);
     
     // Create debug text
     this.debugText = this.add.text(10, 10, '', {
@@ -92,6 +139,9 @@ export class GameScene extends Phaser.Scene {
 
   private async createAndJoinRoom() {
     try {
+      // Clear all existing players before creating new room
+      this.clearAllPlayers();
+      
       this.roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
       await this.joinRoom(this.roomId);
     } catch (error) {
@@ -104,6 +154,9 @@ export class GameScene extends Phaser.Scene {
     try {
       console.log('Attempting to join room:', roomId);
       this.connectionAttempts++;
+      
+      // Clear all existing players before joining new room
+      this.clearAllPlayers();
       
       this.room = await this.client.joinOrCreate('game_room', { roomId });
       this.roomId = roomId;
@@ -181,6 +234,14 @@ export class GameScene extends Phaser.Scene {
         }
       });
 
+      // Add bullet message handler
+      this.room.onMessage("player_shoot", (message) => {
+        const { sessionId, startX, startY, directionX, directionY } = message;
+        if (sessionId !== this.room?.sessionId) {
+          this.createBullet(startX, startY, new Phaser.Math.Vector2(directionX, directionY), sessionId);
+        }
+      });
+
       // Listen for room errors
       this.room.onError((code, message) => {
         console.error('Room error:', code, message);
@@ -219,6 +280,58 @@ export class GameScene extends Phaser.Scene {
         this.handleDisconnect();
       });
 
+      // Add respawn handler
+      this.room.onMessage("player_respawn", (message) => {
+        const { sessionId, x, y, deathCount } = message;
+        const player = this.players.get(sessionId);
+        if (player) {
+          // Show respawn effect
+          this.tweens.add({
+            targets: player,
+            alpha: 0,
+            duration: 200,
+            yoyo: true,
+            repeat: 2,
+            onComplete: () => {
+              player.setPosition(x, y);
+              // Update death count display
+              const text = this.playerTexts.get(sessionId);
+              if (text) {
+                text.setText(`${text.text.split('(')[0]}(${deathCount}/3)`);
+              }
+            }
+          });
+        }
+      });
+
+      // Add game over handler
+      this.room.onMessage("player_game_over", (message) => {
+        const { sessionId } = message;
+        const player = this.players.get(sessionId);
+        if (player) {
+          // Show game over effect
+          this.tweens.add({
+            targets: player,
+            alpha: 0.2,
+            duration: 500,
+            onComplete: () => {
+              player.setFillStyle(0x666666); // Gray out the player
+            }
+          });
+
+          // Update player text
+          const text = this.playerTexts.get(sessionId);
+          if (text) {
+            text.setText(`${text.text.split('(')[0]}(GAME OVER)`);
+          }
+
+          // If it's the current player, show game over message
+          if (sessionId === this.room?.sessionId) {
+            this.showGameOver();
+          }
+        }
+      });
+
       console.log('Room handlers setup complete. Total players:', this.players.size);
 
     } catch (error) {
@@ -232,21 +345,29 @@ export class GameScene extends Phaser.Scene {
       console.log('Updating player position:', sessionId, player);
       const rectangle = this.players.get(sessionId);
       const text = this.playerTexts.get(sessionId);
+      const healthBar = this.healthBars.get(sessionId);
+      const healthBarBg = this.healthBarBgs.get(sessionId);
       
-      if (rectangle && text) {
+      if (rectangle && text && healthBar && healthBarBg) {
         // Lerp the position for smoother movement
         const currentX = rectangle.x;
         const currentY = rectangle.y;
         const targetX = player.x;
         const targetY = player.y;
         
-        const lerpFactor = 0.5; // Adjust this value between 0 and 1 for different smoothing effects
+        const lerpFactor = 0.5;
         
         const newX = currentX + (targetX - currentX) * lerpFactor;
         const newY = currentY + (targetY - currentY) * lerpFactor;
         
+        // Update positions
         rectangle.setPosition(newX, newY);
         text.setPosition(newX, newY - 20);
+        healthBar.setPosition(newX, newY + 20);
+        healthBarBg.setPosition(newX, newY + 20);
+        
+        // Update health bar
+        this.updateHealthBar(sessionId, player.health);
         
         console.log(`Player ${sessionId} moved to:`, newX, newY);
       } else {
@@ -267,8 +388,12 @@ export class GameScene extends Phaser.Scene {
   private clearAllPlayers() {
     this.players.forEach(rectangle => rectangle.destroy());
     this.playerTexts.forEach(text => text.destroy());
+    this.healthBars.forEach(bar => bar.destroy());
+    this.healthBarBgs.forEach(bg => bg.destroy());
     this.players.clear();
     this.playerTexts.clear();
+    this.healthBars.clear();
+    this.healthBarBgs.clear();
     this.currentPlayer = undefined;
   }
 
@@ -289,14 +414,25 @@ export class GameScene extends Phaser.Scene {
       console.log('Player position:', player.x, player.y);
       
       const rectangle = this.add.rectangle(player.x, player.y, 32, 32, 0x00ff00);
-      const text = this.add.text(player.x, player.y - 20, player.name || `Player ${sessionId}`, { 
+      const text = this.add.text(player.x, player.y - 20, 
+        `${player.name || `Player ${sessionId}`}(${player.deathCount}/3)`, { 
         fontSize: '16px',
         color: '#ffffff'
       });
       text.setOrigin(0.5);
+
+      // Add health bar background (gray)
+      const healthBarBg = this.add.rectangle(player.x, player.y + 20, 32, 4, 0x666666);
+      // Add health bar (green)
+      const healthBar = this.add.rectangle(player.x, player.y + 20, 32, 4, 0x00ff00);
       
       this.players.set(sessionId, rectangle);
       this.playerTexts.set(sessionId, text);
+      this.healthBars.set(sessionId, healthBar);
+      this.healthBarBgs.set(sessionId, healthBarBg);
+
+      // Update health bar
+      this.updateHealthBar(sessionId, player.health);
 
       if (sessionId === this.room?.sessionId) {
         this.currentPlayer = rectangle;
@@ -307,16 +443,42 @@ export class GameScene extends Phaser.Scene {
         console.log('Other player initialized with red color:', sessionId);
       }
 
+      // If player is not alive, gray them out
+      if (!player.isAlive) {
+        rectangle.setFillStyle(0x666666);
+        rectangle.setAlpha(0.2);
+        text.setText(`${text.text.split('(')[0]}(GAME OVER)`);
+      }
+
       console.log('Total players after add:', this.players.size);
-      console.log('Players map:', Array.from(this.players.entries()));
     } catch (error) {
       console.error('Error adding player:', error);
+    }
+  }
+
+  private updateHealthBar(sessionId: string, health: number) {
+    const healthBar = this.healthBars.get(sessionId);
+    if (healthBar) {
+      // Update health bar width based on health percentage
+      const healthPercent = Math.max(0, Math.min(1, health / 10));
+      healthBar.setScale(healthPercent, 1);
+      
+      // Change color based on health
+      if (healthPercent > 0.6) {
+        healthBar.setFillStyle(0x00ff00); // Green
+      } else if (healthPercent > 0.3) {
+        healthBar.setFillStyle(0xffff00); // Yellow
+      } else {
+        healthBar.setFillStyle(0xff0000); // Red
+      }
     }
   }
 
   private removePlayer(sessionId: string) {
     const rectangle = this.players.get(sessionId);
     const text = this.playerTexts.get(sessionId);
+    const healthBar = this.healthBars.get(sessionId);
+    const healthBarBg = this.healthBarBgs.get(sessionId);
     
     if (rectangle) {
       rectangle.destroy();
@@ -326,6 +488,16 @@ export class GameScene extends Phaser.Scene {
     if (text) {
       text.destroy();
       this.playerTexts.delete(sessionId);
+    }
+
+    if (healthBar) {
+      healthBar.destroy();
+      this.healthBars.delete(sessionId);
+    }
+
+    if (healthBarBg) {
+      healthBarBg.destroy();
+      this.healthBarBgs.delete(sessionId);
     }
   }
 
@@ -337,8 +509,42 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  update() {
-    if (!this.gameStarted || !this.currentPlayer || !this.cursors || !this.room) {
+  private createBullet(startX: number, startY: number, direction: Phaser.Math.Vector2, ownerId: string) {
+    const bullet = new Bullet(this, startX, startY, ownerId);
+    bullet.fire(direction);
+    this.bullets.push(bullet);
+  }
+
+  private shoot() {
+    if (!this.currentPlayer || !this.room) return;
+
+    const currentTime = Date.now();
+    if (currentTime - this.lastShootTime < this.shootDelay) return;
+    
+    this.lastShootTime = currentTime;
+
+    // Calculate direction towards mouse pointer
+    const pointer = this.input.activePointer;
+    const direction = new Phaser.Math.Vector2(
+      pointer.x - this.currentPlayer.x,
+      pointer.y - this.currentPlayer.y
+    );
+
+    // Create bullet
+    this.createBullet(this.currentPlayer.x, this.currentPlayer.y, direction, this.room.sessionId);
+
+    // Send bullet info to other players
+    this.room.send("player_shoot", {
+      sessionId: this.room.sessionId,
+      startX: this.currentPlayer.x,
+      startY: this.currentPlayer.y,
+      directionX: direction.x,
+      directionY: direction.y
+    });
+  }
+
+  update(time: number, delta: number) {
+    if (!this.gameStarted || !this.currentPlayer || !this.cursors || !this.wasdKeys || !this.room) {
       if (this.debugText) {
         this.debugText.setText(`Game State:\nStarted: ${this.gameStarted}\nPlayer: ${!!this.currentPlayer}\nCursors: ${!!this.cursors}\nRoom: ${!!this.room}`);
       }
@@ -347,16 +553,17 @@ export class GameScene extends Phaser.Scene {
 
     const velocity = { x: 0, y: 0 };
 
-    if (this.cursors.left.isDown) {
+    // Arrow key controls
+    if (this.cursors.left.isDown || this.wasdKeys.A.isDown) {
       velocity.x = -this.playerSpeed;
     }
-    if (this.cursors.right.isDown) {
+    if (this.cursors.right.isDown || this.wasdKeys.D.isDown) {
       velocity.x = this.playerSpeed;
     }
-    if (this.cursors.up.isDown) {
+    if (this.cursors.up.isDown || this.wasdKeys.W.isDown) {
       velocity.y = -this.playerSpeed;
     }
-    if (this.cursors.down.isDown) {
+    if (this.cursors.down.isDown || this.wasdKeys.S.isDown) {
       velocity.y = this.playerSpeed;
     }
 
@@ -385,5 +592,73 @@ export class GameScene extends Phaser.Scene {
         );
       }
     }
+
+    // Update bullets
+    this.bullets = this.bullets.filter(bullet => bullet.active);
+    this.bullets.forEach(bullet => {
+      bullet.update(time, delta);
+      
+      // Check for collisions with players
+      this.players.forEach((playerRect, sessionId) => {
+        if (sessionId !== bullet.ownerId && this.checkCollision(bullet, playerRect)) {
+          // Handle hit
+          bullet.destroy();
+          this.handlePlayerHit(sessionId);
+        }
+      });
+    });
+
+    // Handle shooting
+    if (this.input.activePointer.isDown) {
+      this.shoot();
+    }
+  }
+
+  private checkCollision(bullet: Bullet, player: Phaser.GameObjects.Rectangle): boolean {
+    return Phaser.Geom.Intersects.RectangleToRectangle(
+      bullet.getBounds(),
+      player.getBounds()
+    );
+  }
+
+  private handlePlayerHit(sessionId: string) {
+    // Flash the hit player red
+    const player = this.players.get(sessionId);
+    if (player) {
+      this.tweens.add({
+        targets: player,
+        alpha: 0.5,
+        duration: 100,
+        yoyo: true,
+        repeat: 3
+      });
+
+      // Send damage to server
+      if (this.room) {
+        this.room.send("player_hit", { targetId: sessionId });
+      }
+    }
+  }
+
+  private showGameOver() {
+    const gameOverText = this.add.text(400, 300, 'GAME OVER\nYou died 3 times!', {
+      fontSize: '48px',
+      color: '#ff0000',
+      align: 'center'
+    }).setOrigin(0.5);
+
+    // Add restart button
+    const restartButton = this.add.text(400, 400, 'Restart', {
+      fontSize: '32px',
+      color: '#ffffff',
+      backgroundColor: '#00aa00',
+      padding: { x: 20, y: 10 }
+    }).setOrigin(0.5).setInteractive();
+
+    restartButton.on('pointerdown', () => {
+      gameOverText.destroy();
+      restartButton.destroy();
+      this.scene.restart();
+    });
   }
 } 
