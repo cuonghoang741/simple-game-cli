@@ -6,7 +6,7 @@
     "dev:server": "cd server && npm run dev",
     "dev:ui": "cd ui && npm run dev",
     "install:all": "npm install && cd server && npm install && cd ../ui && npm install",
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:ui\""
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:ui --host\""
   },
   "dependencies": {
     "concurrently": "^9.1.2"
