@@ -1,5 +1,6 @@
 import * as Phaser from 'phaser';
 import { Client, Room } from 'colyseus.js';
+import { config } from '../config/env';
 
 class Bullet extends Phaser.GameObjects.Rectangle {
   velocity: Phaser.Math.Vector2;
@@ -67,8 +68,8 @@ export class GameScene extends Phaser.Scene {
 
   constructor() {
     super({ key: 'GameScene' });
-    this.client = new Client('ws://localhost:2000');
-    console.log('Game scene initialized');
+    this.client = new Client(config.BACKEND_WS_URL);
+    console.log('Game scene initialized with backend URL:', config.BACKEND_WS_URL);
   }
 
   preload() {
