@@ -15,7 +15,7 @@ import express from "express";
 import { monitor } from "@colyseus/monitor";
 import { GameRoom } from "./rooms/GameRoom";
 
-const port = Number(process.env.PORT || 3000);
+const port = Number(process.env.PORT || 2000);
 const app = express();
 
 app.use(express.json());

@@ -67,7 +67,7 @@ export class GameScene extends Phaser.Scene {
 
   constructor() {
     super({ key: 'GameScene' });
-    this.client = new Client('ws://localhost:3000');
+    this.client = new Client('ws://localhost:2000');
     console.log('Game scene initialized');
   }
 
